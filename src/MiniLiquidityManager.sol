@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -10,127 +11,123 @@ import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+import {
+    IRouter
+} from "./interfaces/IRouter.sol";
 
-interface IRouter {
-
-    function addLiquidity(
-        address tokenA,
-        address tokenB,
-        uint amountADesired,
-        uint amountBDesired,
-        uint amountAMin,
-        uint amountBMin,
-        address to,
-        uint deadline
-    )
-        external
-        returns (
-            uint amountA,
-            uint amountB,
-            uint liquidity
-        );
-
-
-    function swapExactTokensForTokens(
-        uint amountIn,
-        uint amountOutMin,
-        address[] calldata path,
-        address to,
-        uint deadline
-    )
-        external
-        returns (uint[] memory amounts);
-}
-
-
-contract MiniLiquidityManager is Ownable, ReentrancyGuard {
-
+contract MiniLiquidityManager is
+    Ownable,
+    Pausable,
+    ReentrancyGuard
+{
     using SafeERC20 for IERC20;
 
+    // =============================================================
+    //                           ERRORS
+    // =============================================================
 
     error InvalidAddress();
     error InvalidAmount();
     error InvalidPath();
     error DeadlineExpired();
+    error SameToken();
 
+    // =============================================================
+    //                           STORAGE
+    // =============================================================
 
     IRouter public immutable router;
 
+    mapping(address => uint256) public totalLiquidityActions;
+    mapping(address => uint256) public totalSwapActions;
+
+    // =============================================================
+    //                           EVENTS
+    // =============================================================
 
     event LiquidityAdded(
         address indexed user,
         address indexed tokenA,
         address indexed tokenB,
-        uint amountAUsed,
-        uint amountBUsed,
-        uint liquidity
+        uint256 amountAUsed,
+        uint256 amountBUsed,
+        uint256 liquidity
     );
-
 
     event SwapExecuted(
         address indexed user,
         address indexed tokenIn,
         address indexed tokenOut,
-        uint amountIn,
-        uint amountOut
+        uint256 amountIn,
+        uint256 amountOut
     );
-
 
     event DustRefunded(
         address indexed user,
         address indexed token,
-        uint amount
+        uint256 amount
     );
 
+    event EmergencyWithdraw(
+        address indexed token,
+        uint256 amount
+    );
+
+    // =============================================================
+    //                         CONSTRUCTOR
+    // =============================================================
 
     constructor(address _router)
         Ownable(msg.sender)
     {
-        if (_router == address(0))
+        if (_router == address(0)) {
             revert InvalidAddress();
+        }
 
         router = IRouter(_router);
     }
 
+    // =============================================================
+    //                         MODIFIERS
+    // =============================================================
 
-    modifier ensure(uint deadline) {
-
-        if (deadline < block.timestamp)
+    modifier ensure(uint256 deadline) {
+        if (deadline < block.timestamp) {
             revert DeadlineExpired();
+        }
 
         _;
-
     }
 
+    // =============================================================
+    //                    LIQUIDITY MANAGEMENT
+    // =============================================================
 
     function addLiquidity(
         address tokenA,
         address tokenB,
-
-        uint amountA,
-        uint amountB,
-
-        uint amountAMin,
-        uint amountBMin,
-
-        uint deadline
-
+        uint256 amountA,
+        uint256 amountB,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        uint256 deadline
     )
         external
         nonReentrant
+        whenNotPaused
         ensure(deadline)
-
     {
-
-        if (tokenA == address(0))
+        if (tokenA == address(0) || tokenB == address(0)) {
             revert InvalidAddress();
+        }
 
-        if (tokenB == address(0))
-            revert InvalidAddress();
+        if (tokenA == tokenB) {
+            revert SameToken();
+        }
 
-        if (amountA == 0 || amountB == 0)
+        if (amountA == 0 || amountB == 0) {
             revert InvalidAmount();
-
+        }
 
         IERC20(tokenA).safeTransferFrom(
             msg.sender,
@@ -144,7 +141,6 @@ contract MiniLiquidityManager is Ownable, ReentrancyGuard {
             amountB
         );
 
-
         IERC20(tokenA).forceApprove(
             address(router),
             amountA
@@ -155,92 +151,66 @@ contract MiniLiquidityManager is Ownable, ReentrancyGuard {
             amountB
         );
 
-
         (
-            uint usedA,
-            uint usedB,
-            uint liquidity
-
+            uint256 usedA,
+            uint256 usedB,
+            uint256 liquidity
         ) = router.addLiquidity(
-
             tokenA,
             tokenB,
-
             amountA,
             amountB,
-
             amountAMin,
             amountBMin,
-
             msg.sender,
             deadline
         );
 
+        _refundDust(tokenA, amountA - usedA);
+        _refundDust(tokenB, amountB - usedB);
 
-        _refundDust(
-            tokenA,
-            amountA - usedA
-        );
-
-        _refundDust(
-            tokenB,
-            amountB - usedB
-        );
-
+        unchecked {
+            totalLiquidityActions[msg.sender]++;
+        }
 
         emit LiquidityAdded(
             msg.sender,
-
             tokenA,
             tokenB,
-
             usedA,
             usedB,
-
             liquidity
         );
 
-
-        IERC20(tokenA).forceApprove(
-            address(router),
-            0
-        );
-
-        IERC20(tokenB).forceApprove(
-            address(router),
-            0
-        );
+        IERC20(tokenA).forceApprove(address(router), 0);
+        IERC20(tokenB).forceApprove(address(router), 0);
     }
 
-
+    // =============================================================
+    //                             SWAP
+    // =============================================================
 
     function swap(
-        uint amountIn,
-        uint amountOutMin,
-
+        uint256 amountIn,
+        uint256 amountOutMin,
         address[] calldata path,
-
-        uint deadline
-
+        uint256 deadline
     )
         external
         nonReentrant
+        whenNotPaused
         ensure(deadline)
-
     {
-
-        if (amountIn == 0)
+        if (amountIn == 0) {
             revert InvalidAmount();
+        }
 
-        if (path.length < 2)
+        if (path.length < 2) {
             revert InvalidPath();
-
+        }
 
         address tokenIn = path[0];
-        address tokenOut = path[
-            path.length - 1
-        ];
-
+        address tokenOut = path[path.length - 1];
 
         IERC20(tokenIn).safeTransferFrom(
             msg.sender,
@@ -248,87 +218,80 @@ contract MiniLiquidityManager is Ownable, ReentrancyGuard {
             amountIn
         );
 
-
         IERC20(tokenIn).forceApprove(
             address(router),
             amountIn
         );
 
-
-        uint[] memory amounts =
+        uint256[] memory amounts =
             router.swapExactTokensForTokens(
-
                 amountIn,
                 amountOutMin,
-
                 path,
-
                 msg.sender,
-
                 deadline
             );
 
+        unchecked {
+            totalSwapActions[msg.sender]++;
+        }
 
         emit SwapExecuted(
             msg.sender,
-
             tokenIn,
             tokenOut,
-
             amountIn,
-
-            amounts[
-                amounts.length - 1
-            ]
+            amounts[amounts.length - 1]
         );
 
-
-        IERC20(tokenIn).forceApprove(
-            address(router),
-            0
-        );
+        IERC20(tokenIn).forceApprove(address(router), 0);
     }
 
+    // =============================================================
+    //                         ADMIN ACTIONS
+    // =============================================================
 
+    function pause()
+        external
+        onlyOwner
+    {
+        _pause();
+    }
+
+    function unpause()
+        external
+        onlyOwner
+    {
+        _unpause();
+    }
 
     function rescueToken(
-        address token
+        address token,
+        uint256 amount
     )
         external
         onlyOwner
-
     {
+        IERC20(token).safeTransfer(owner(), amount);
 
-        uint balance =
-            IERC20(token).balanceOf(
-                address(this)
-            );
-
-
-        IERC20(token).safeTransfer(
-            owner(),
-            balance
-        );
+        emit EmergencyWithdraw(token, amount);
     }
 
-
+    // =============================================================
+    //                         INTERNAL LOGIC
+    // =============================================================
 
     function _refundDust(
         address token,
-        uint amount
+        uint256 amount
     )
-        private
+        internal
     {
-
-        if (amount == 0)
+        if (amount == 0) {
             return;
+        }
 
-
-        IERC20(token).safeTransfer(
-            msg.sender,
-            amount
-        );
-
+        IERC20(token).safeTransfer(msg.sender, amount);
 
         emit DustRefunded(
             msg.sender,
