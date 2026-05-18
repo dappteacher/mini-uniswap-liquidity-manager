@@ -33,11 +33,11 @@ contract MockERC20Test is Test {
         assertEq(weth.balanceOf(alice), amount);
     }
 
-    function testUSDCDecimals() public {
+    function testUSDCDecimals() public view{
         assertEq(usdc.decimals(), 6);
     }
 
-    function testWETHDecimals() public {
+    function testWETHDecimals() public view{
         assertEq(weth.decimals(), 18);
     }
 }
