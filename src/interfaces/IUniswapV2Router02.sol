@@ -2,28 +2,19 @@
 pragma solidity ^0.8.24;
 
 interface IUniswapV2Router02 {
-    function swapExactTokensForTokens(
-        uint amountIn,
-        uint amountOutMin,
-        address[] calldata path,
-        address to,
-        uint deadline
-    ) external returns (uint[] memory amounts);
-
-    function addLiquidity(
-        address tokenA,
-        address tokenB,
-        uint amountADesired,
-        uint amountBDesired,
-        uint amountAMin,
-        uint amountBMin,
-        address to,
-        uint deadline
+    function getAmountsOut(
+        uint256 amountIn,
+        address[] calldata path
     )
         external
-        returns (
-            uint amountA,
-            uint amountB,
-            uint liquidity
-        );
+        view
+        returns (uint256[] memory amounts);
+
+    function getAmountsIn(
+        uint256 amountOut,
+        address[] calldata path
+    )
+        external
+        view
+        returns (uint256[] memory amounts);
 }

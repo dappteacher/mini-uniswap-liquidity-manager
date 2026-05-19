@@ -3,21 +3,13 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 
-import {
-    MiniLiquidityManager
-} from "../../src/MiniLiquidityManager.sol";
+import {MiniLiquidityManager} from "../../src/MiniLiquidityManager.sol";
 
-import {
-    ERC20Mock
-} from "../../src/mocks/ERC20Mock.sol";
+import {ERC20Mock} from "../../src/mocks/ERC20Mock.sol";
 
-import {
-    RouterMock
-} from "../../src/mocks/RouterMock.sol";
-
+import {RouterMock} from "../../src/mocks/RouterMock.sol";
 
 contract MiniLiquidityManagerUnitTest is Test {
-
     MiniLiquidityManager manager;
 
     ERC20Mock tokenA;
@@ -25,181 +17,98 @@ contract MiniLiquidityManagerUnitTest is Test {
 
     RouterMock router;
 
+    address alice = address(1);
 
-    address alice =
-        address(1);
+    function setUp() public {
+        router = new RouterMock();
 
+        manager = new MiniLiquidityManager(address(router));
 
-    function setUp()
-        public
-    {
+        tokenA = new ERC20Mock();
 
-        router =
-            new RouterMock();
+        tokenB = new ERC20Mock();
 
-        manager =
-            new MiniLiquidityManager(
-                address(router)
-            );
+        tokenA.mint(alice, 1_000 ether);
 
+        tokenB.mint(alice, 1_000 ether);
 
-        tokenA =
-            new ERC20Mock();
+        vm.startPrank(alice);
 
-        tokenB =
-            new ERC20Mock();
+        tokenA.approve(address(manager), type(uint).max);
 
-
-        tokenA.mint(
-            alice,
-            1_000 ether
-        );
-
-        tokenB.mint(
-            alice,
-            1_000 ether
-        );
-
-
-        vm.startPrank(
-            alice
-        );
-
-
-        tokenA.approve(
-            address(manager),
-            type(uint).max
-        );
-
-        tokenB.approve(
-            address(manager),
-            type(uint).max
-        );
-
+        tokenB.approve(address(manager), type(uint).max);
 
         vm.stopPrank();
     }
 
-
-    function test_AddLiquidity()
-        public
-    {
-
-        vm.startPrank(
-            alice
-        );
-
+    function test_AddLiquidity() public {
+        vm.startPrank(alice);
 
         manager.addLiquidity(
-
             address(tokenA),
             address(tokenB),
-
             100 ether,
             100 ether,
-
             0,
             0,
-
             block.timestamp + 1
         );
 
-
         vm.stopPrank();
     }
 
+    function test_Swap() public {
+        address[] memory path = new address[](2);
 
-    function test_Swap()
-        public
-    {
+        path[0] = address(tokenA);
 
-        address[] memory path =
-            new address[](2);
+        path[1] = address(tokenB);
 
-        path[0] =
-            address(tokenA);
+        vm.startPrank(alice);
 
-        path[1] =
-            address(tokenB);
-
-
-        vm.startPrank(
-            alice
-        );
-
-
-        manager.swap(
-
-            10 ether,
-            0,
-
+        manager.swapExactInput(
+            100 ether,
+            95 ether,
+            300,
             path,
-
-            block.timestamp + 1
+            block.timestamp + 1 hours
         );
-
 
         vm.stopPrank();
     }
 
-
-    function test_RevertZeroAmount()
-        public
-    {
-
-        vm.startPrank(
-            alice
-        );
-
+    function test_RevertZeroAmount() public {
+        vm.startPrank(alice);
 
         vm.expectRevert();
 
-
         manager.addLiquidity(
-
             address(tokenA),
             address(tokenB),
-
             0,
             100 ether,
-
             0,
             0,
-
             block.timestamp + 1
         );
-
 
         vm.stopPrank();
     }
 
-
-    function test_RevertExpiredDeadline()
-        public
-    {
-
-        vm.startPrank(
-            alice
-        );
-
+    function test_RevertExpiredDeadline() public {
+        vm.startPrank(alice);
 
         vm.expectRevert();
 
-
         manager.addLiquidity(
-
             address(tokenA),
             address(tokenB),
-
             100 ether,
             100 ether,
-
             0,
             0,
-
             block.timestamp - 1
         );
-
 
         vm.stopPrank();
     }

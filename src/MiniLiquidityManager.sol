@@ -15,6 +15,14 @@ import {
     IRouter
 } from "./interfaces/IRouter.sol";
 
+import {
+    IERC20Permit
+} from "./interfaces/IERC20Permit.sol";
+
+import {
+    SlippageLib
+} from "./libraries/SlippageLib.sol";
+
 contract MiniLiquidityManager is
     Ownable,
     Pausable,
@@ -23,14 +31,21 @@ contract MiniLiquidityManager is
     using SafeERC20 for IERC20;
 
     // =============================================================
-    //                           ERRORS
+    //                           CONSTANTS
+    // =============================================================
+
+    uint256 public constant MAX_SLIPPAGE_BPS = 500;
+
+    // =============================================================
+    //                            ERRORS
     // =============================================================
 
     error InvalidAddress();
     error InvalidAmount();
     error InvalidPath();
-    error DeadlineExpired();
     error SameToken();
+    error SlippageTooHigh();
+    error DeadlineExpired();
 
     // =============================================================
     //                           STORAGE
@@ -38,11 +53,12 @@ contract MiniLiquidityManager is
 
     IRouter public immutable router;
 
+    mapping(address => uint256) public totalVolumeIn;
+    mapping(address => uint256) public totalSwaps;
     mapping(address => uint256) public totalLiquidityActions;
-    mapping(address => uint256) public totalSwapActions;
 
     // =============================================================
-    //                           EVENTS
+    //                            EVENTS
     // =============================================================
 
     event LiquidityAdded(
@@ -68,13 +84,13 @@ contract MiniLiquidityManager is
         uint256 amount
     );
 
-    event EmergencyWithdraw(
-        address indexed token,
+    event PermitUsed(
+        address indexed owner,
         uint256 amount
     );
 
     // =============================================================
-    //                         CONSTRUCTOR
+    //                          CONSTRUCTOR
     // =============================================================
 
     constructor(address _router)
@@ -88,7 +104,7 @@ contract MiniLiquidityManager is
     }
 
     // =============================================================
-    //                         MODIFIERS
+    //                           MODIFIERS
     // =============================================================
 
     modifier ensure(uint256 deadline) {
@@ -100,7 +116,7 @@ contract MiniLiquidityManager is
     }
 
     // =============================================================
-    //                    LIQUIDITY MANAGEMENT
+    //                     LIQUIDITY MANAGEMENT
     // =============================================================
 
     function addLiquidity(
@@ -166,8 +182,35 @@ contract MiniLiquidityManager is
             deadline
         );
 
-        _refundDust(tokenA, amountA - usedA);
-        _refundDust(tokenB, amountB - usedB);
+        if (amountA > usedA) {
+            uint256 refundA = amountA - usedA;
+
+            IERC20(tokenA).safeTransfer(
+                msg.sender,
+                refundA
+            );
+
+            emit DustRefunded(
+                msg.sender,
+                tokenA,
+                refundA
+            );
+        }
+
+        if (amountB > usedB) {
+            uint256 refundB = amountB - usedB;
+
+            IERC20(tokenB).safeTransfer(
+                msg.sender,
+                refundB
+            );
+
+            emit DustRefunded(
+                msg.sender,
+                tokenB,
+                refundB
+            );
+        }
 
         unchecked {
             totalLiquidityActions[msg.sender]++;
@@ -190,9 +233,10 @@ contract MiniLiquidityManager is
     //                             SWAP
     // =============================================================
 
-    function swap(
+    function swapExactInput(
         uint256 amountIn,
-        uint256 amountOutMin,
+        uint256 expectedAmountOut,
+        uint256 slippageBps,
         address[] calldata path,
         uint256 deadline
     )
@@ -200,6 +244,7 @@ contract MiniLiquidityManager is
         nonReentrant
         whenNotPaused
         ensure(deadline)
+        returns (uint256 amountOut)
     {
         if (amountIn == 0) {
             revert InvalidAmount();
@@ -208,6 +253,16 @@ contract MiniLiquidityManager is
         if (path.length < 2) {
             revert InvalidPath();
         }
+
+        if (slippageBps > MAX_SLIPPAGE_BPS) {
+            revert SlippageTooHigh();
+        }
+
+        uint256 minOut =
+            SlippageLib.calculateMinAmount(
+                expectedAmountOut,
+                slippageBps
+            );
 
         address tokenIn = path[0];
         address tokenOut = path[path.length - 1];
@@ -226,14 +281,17 @@ contract MiniLiquidityManager is
         uint256[] memory amounts =
             router.swapExactTokensForTokens(
                 amountIn,
-                amountOutMin,
+                minOut,
                 path,
                 msg.sender,
                 deadline
             );
 
+        amountOut = amounts[amounts.length - 1];
+
         unchecked {
-            totalSwapActions[msg.sender]++;
+            totalVolumeIn[msg.sender] += amountIn;
+            totalSwaps[msg.sender]++;
         }
 
         emit SwapExecuted(
@@ -241,7 +299,100 @@ contract MiniLiquidityManager is
             tokenIn,
             tokenOut,
             amountIn,
-            amounts[amounts.length - 1]
+            amountOut
+        );
+
+        IERC20(tokenIn).forceApprove(address(router), 0);
+    }
+
+    // =============================================================
+    //                       PERMIT + SWAP
+    // =============================================================
+
+    function permitAndSwap(
+        address token,
+        uint256 amount,
+        uint256 permitDeadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s,
+        uint256 expectedAmountOut,
+        uint256 slippageBps,
+        address[] calldata path,
+        uint256 swapDeadline
+    )
+        external
+        nonReentrant
+        whenNotPaused
+        ensure(swapDeadline)
+        returns (uint256 amountOut)
+    {
+        IERC20Permit(token).permit(
+            msg.sender,
+            address(this),
+            amount,
+            permitDeadline,
+            v,
+            r,
+            s
+        );
+
+        emit PermitUsed(msg.sender, amount);
+
+        if (amount == 0) {
+            revert InvalidAmount();
+        }
+
+        if (path.length < 2) {
+            revert InvalidPath();
+        }
+
+        if (slippageBps > MAX_SLIPPAGE_BPS) {
+            revert SlippageTooHigh();
+        }
+
+        uint256 minOut =
+            SlippageLib.calculateMinAmount(
+                expectedAmountOut,
+                slippageBps
+            );
+
+        address tokenIn = path[0];
+        address tokenOut = path[path.length - 1];
+
+        IERC20(tokenIn).safeTransferFrom(
+            msg.sender,
+            address(this),
+            amount
+        );
+
+        IERC20(tokenIn).forceApprove(
+            address(router),
+            amount
+        );
+
+        uint256[] memory amounts =
+            router.swapExactTokensForTokens(
+                amount,
+                minOut,
+                path,
+                msg.sender,
+                swapDeadline
+            );
+
+        amountOut = amounts[amounts.length - 1];
+
+        unchecked {
+            totalVolumeIn[msg.sender] += amount;
+            totalSwaps[msg.sender]++;
+        }
+
+        emit SwapExecuted(
+            msg.sender,
+            tokenIn,
+            tokenOut,
+            amount,
+            amountOut
         );
 
         IERC20(tokenIn).forceApprove(address(router), 0);
@@ -263,40 +414,5 @@ contract MiniLiquidityManager is
         onlyOwner
     {
         _unpause();
-    }
-
-    function rescueToken(
-        address token,
-        uint256 amount
-    )
-        external
-        onlyOwner
-    {
-        IERC20(token).safeTransfer(owner(), amount);
-
-        emit EmergencyWithdraw(token, amount);
-    }
-
-    // =============================================================
-    //                         INTERNAL LOGIC
-    // =============================================================
-
-    function _refundDust(
-        address token,
-        uint256 amount
-    )
-        internal
-    {
-        if (amount == 0) {
-            return;
-        }
-
-        IERC20(token).safeTransfer(msg.sender, amount);
-
-        emit DustRefunded(
-            msg.sender,
-            token,
-            amount
-        );
     }
 }
